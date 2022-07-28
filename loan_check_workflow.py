@@ -2,19 +2,18 @@ import datetime
 import matplotlib
 import numpy as np
 import pandas as pd
-import seaborn as sns
 from sklearn import metrics, model_selection, ensemble
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 
-import xgboost as xgb
-
 from prefect import flow, task
 from prefect.task_runners import SequentialTaskRunner
 
+from pandas_profiling import ProfileReport
+
 @task
-def looad_data(path):
+def load_data(path):
     data = pd.read_csv(path)
     data['Loan_Status'] = data['Loan_Status'].replace({'Y' : 1, 'N' : 0}).astype(int)
     data['Property_Area'] = data['Property_Area'].replace({'Rural' : -1, 'Semiurban' : 0, 'Urban':1}).astype(int)
@@ -34,33 +33,12 @@ def generate_datasets(train_frame):
     
     X = num_data.drop(columns='Loan_Status')
     y = num_data.Loan_Status
-    
 
-    return X, y
+    return train_test_split(X,y, test_size=0.2, random_state=0)
 
 @task
-def train_model(model, X, y):
-    numeric_baseline_score = model_selection.cross_val_score(
-    model,
-    X = X,
-    y = y,
-    cv = 5,
-    scoring = 'accuracy'
-    )
-    return numeric_baseline_score
-  
-@task
-def estimate_quality(numeric_baseline_score):
-    mean = numeric_baseline_score.mean()
-    std = numeric_baseline_score.std()
-    return mean, std 
-    
-@flow(task_runner=SequentialTaskRunner())
-def nyc_duration_flow():
-    train_frame = looad_data('data/loan-train.csv')
-    
-    X, y = generate_datasets(train_frame).result()
-    
+def train_model(X, y):
+
     #best model
     best_params = {
         'C': 1.0489085915266627,
@@ -69,9 +47,48 @@ def nyc_duration_flow():
 
     best_model = LogisticRegression(**best_params)
     
-    numeric_baseline_score = train_model(best_model, X, y)
+    best_model.fit(X, y)
+    
+    return best_model
 
-    score_mean, score_std = estimate_quality(numeric_baseline_score).result()
+@task
+def estimate_quality(model, X, y):
 
-nyc_duration_flow()
+    numeric_baseline_score = model_selection.cross_val_score(
+    model,
+    X = X,
+    y = y,
+    cv = 5,
+    scoring = 'accuracy'
+    )
+    
+    mean = numeric_baseline_score.mean()
+    std = numeric_baseline_score.std()
+    
+    return mean, std 
+
+def output_accuracy(accuracy):
+    f = open("model_quality.txt", "w")
+    f.write("accuracy on test data:" + str(accuracy))
+    f.close()
+
+@flow(task_runner=SequentialTaskRunner())
+def loan_check_flow():
+    train_frame = load_data('data/loan-train.csv')
+    
+    X_train, X_test, y_train, y_test = generate_datasets(train_frame).result()
+    
+    model = train_model(X_train, y_train)
+
+    score_mean, score_std = estimate_quality(model,X_test, y_test).result()
+
+    return X_train, score_mean
+
+
+data, accuracy = loan_check_flow().result()
+
+output_accuracy(accuracy)
+
+profile = ProfileReport(data)
+profile.to_file("Data_Quality.html")
 
